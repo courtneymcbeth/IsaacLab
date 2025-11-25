@@ -525,10 +525,13 @@ class CuroboPlanner(MotionPlannerBase):
         Raises:
             RuntimeError: If the set of objects has changed at runtime
         """
+        print("[DEBUG update_world] Starting update_world...", flush=True)
 
         # Establish validation baseline on first call, validate on subsequent calls
         if self._expected_objects is None:
+            print("[DEBUG update_world] First call, getting world object names...", flush=True)
             self._expected_objects = set(self._get_world_object_names())
+            print(f"[DEBUG update_world] Established baseline: {len(self._expected_objects)} objects", flush=True)
             self.logger.debug(f"Established object validation baseline: {len(self._expected_objects)} objects")
         else:
             # Subsequent calls: validate no changes
@@ -550,13 +553,19 @@ class CuroboPlanner(MotionPlannerBase):
                 raise RuntimeError(error_msg)
 
         # Sync object poses with Isaac Lab
+        print("[DEBUG update_world] Calling _sync_object_poses_with_isaaclab...", flush=True)
         self._sync_object_poses_with_isaaclab()
+        print("[DEBUG update_world] _sync_object_poses_with_isaaclab completed", flush=True)
 
         if self.visualize_spheres:
+            print("[DEBUG update_world] Calling _update_sphere_visualization...", flush=True)
             self._update_sphere_visualization(force_update=True)
+            print("[DEBUG update_world] _update_sphere_visualization completed", flush=True)
 
         if torch.cuda.is_available():
+            print("[DEBUG update_world] Calling torch.cuda.synchronize...", flush=True)
             torch.cuda.synchronize()
+            print("[DEBUG update_world] update_world completed", flush=True)
 
     def _get_world_object_names(self) -> list[str]:
         """Extract all object names from cuRobo's collision world model.
@@ -1545,6 +1554,53 @@ class CuroboPlanner(MotionPlannerBase):
 
         return planned_poses
 
+    def get_planned_joint_positions(self) -> list[torch.Tensor]:
+        """Extract all joint positions from current trajectory.
+
+        Returns joint positions for all waypoints in the current trajectory without
+        affecting the execution state. This is more efficient than computing IK from
+        end-effector poses since the joint trajectory is already available.
+
+        Returns:
+            List of joint position tensors, one for each waypoint in the trajectory
+        """
+        if self._current_plan is None:
+            return []
+
+        # Save current execution state
+        original_plan_index = self._plan_index
+
+        # Iterate through the plan to get all joint positions
+        planned_joint_positions: list[torch.Tensor] = []
+        self._plan_index = 0
+        while self.has_next_waypoint():
+            # Directly access the joint positions from the plan
+            next_joint_state: JointState = self._current_plan[self._plan_index]
+            self._plan_index += 1
+
+            # Extract joint positions and convert to environment device
+            # Position is shape (1, num_joints) or (num_joints,), take first if batched
+            if isinstance(next_joint_state.position, torch.Tensor):
+                joint_pos = self._to_env_device(next_joint_state.position)
+                # If batched (shape: (1, num_joints)), extract the batch
+                if joint_pos.ndim > 1:
+                    joint_pos = joint_pos[0]
+            else:
+                joint_pos = next_joint_state.position
+                if hasattr(joint_pos, '__len__') and len(joint_pos) > 0 and hasattr(joint_pos[0], '__len__'):
+                    joint_pos = joint_pos[0]
+            planned_joint_positions.append(joint_pos)
+
+        # Restore the original execution state
+        self._plan_index = original_plan_index
+
+        if self.n_repeat is not None and self.n_repeat > 0 and len(planned_joint_positions) > 0:
+            self.logger.info(f"Repeating final joint position {self.n_repeat} times")
+            final_joint_pos: torch.Tensor = planned_joint_positions[-1]
+            planned_joint_positions.extend([final_joint_pos] * self.n_repeat)
+
+        return planned_joint_positions
+
     # =====================================================================================
     # VISUALIZATION METHODS
     # =====================================================================================
@@ -1772,11 +1828,18 @@ class CuroboPlanner(MotionPlannerBase):
         self.logger.debug("=== MOTION PLANNING DEBUG ===")
         self.logger.debug(f"Expected attached object: {expected_attached_object}")
 
+        print("[DEBUG curobo_planner] About to call update_world()...", flush=True)
         self.update_world()
+        print("[DEBUG curobo_planner] update_world() completed", flush=True)
         gripper_closed = expected_attached_object is not None
+        print(f"[DEBUG curobo_planner] gripper_closed={gripper_closed}, calling _set_gripper_state...", flush=True)
         self._set_gripper_state(gripper_closed)
+        print("[DEBUG curobo_planner] _set_gripper_state completed", flush=True)
         current_attached = self.get_attached_objects()
+        print(f"[DEBUG curobo_planner] current_attached={current_attached}", flush=True)
+        print(f"[DEBUG curobo_planner] Getting gripper_pos, robot={self.robot}, env_id={env_id}...", flush=True)
         gripper_pos = self.robot.data.joint_pos[env_id, -2:]
+        print(f"[DEBUG curobo_planner] gripper_pos={gripper_pos}", flush=True)
 
         self.logger.debug(f"Current attached objects: {current_attached}")
 
@@ -1837,7 +1900,9 @@ class CuroboPlanner(MotionPlannerBase):
 
         self.logger.debug(f"Planning motion with attached objects: {self.get_attached_objects()}")
 
+        print(f"[DEBUG curobo_planner] About to call plan_motion(target_pose, step_size={step_size}, enable_retiming={enable_retiming})...", flush=True)
         plan_success = self.plan_motion(target_pose, step_size, enable_retiming)
+        print(f"[DEBUG curobo_planner] plan_motion completed, result={plan_success}", flush=True)
 
         self.logger.debug(f"Planning result: {plan_success}")
         self.logger.debug("=== END POST-GRASP DEBUG ===")

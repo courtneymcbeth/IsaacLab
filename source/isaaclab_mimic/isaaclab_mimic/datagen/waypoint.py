@@ -21,17 +21,20 @@ class Waypoint:
     Represents a single desired 6-DoF waypoint, along with corresponding gripper actuation for this point.
     """
 
-    def __init__(self, pose, gripper_action, noise=None):
+    def __init__(self, pose, gripper_action, noise=None, joint_positions=None):
         """
         Args:
             pose (torch.Tensor): 4x4 pose target for robot controller
             gripper_action (torch.Tensor): gripper action for robot controller
             noise (float or None): action noise amplitude to apply during execution at this timestep
                 (for arm actions, not gripper actions)
+            joint_positions (torch.Tensor or None): optional pre-computed joint positions for this waypoint.
+                If provided, the controller can use these directly instead of solving IK from the pose.
         """
         self.pose = pose
         self.gripper_action = gripper_action
         self.noise = noise
+        self.joint_positions = joint_positions  # Optional: direct joint positions from motion planner
 
     def __str__(self):
         """String representation of the waypoint."""
@@ -386,14 +389,31 @@ class MultiWaypoint:
         # construct action from target poses and gripper actions
         target_eef_pose_dict = {eef_name: waypoint.pose for eef_name, waypoint in self.waypoints.items()}
         gripper_action_dict = {eef_name: waypoint.gripper_action for eef_name, waypoint in self.waypoints.items()}
+        # Extract joint positions if available (more efficient than IK)
+        joint_positions_dict = {eef_name: waypoint.joint_positions for eef_name, waypoint in self.waypoints.items() if waypoint.joint_positions is not None}
+
+        # Debug: Print target poses
+        for eef_name, pose in target_eef_pose_dict.items():
+            print(f"[DEBUG MultiWaypoint.execute] {eef_name} target pose:\n{pose}", flush=True)
         if "action_noise_dict" in inspect.signature(env.target_eef_pose_to_action).parameters:
             action_noise_dict = {eef_name: waypoint.noise for eef_name, waypoint in self.waypoints.items()}
-            play_action = env.target_eef_pose_to_action(
-                target_eef_pose_dict=target_eef_pose_dict,
-                gripper_action_dict=gripper_action_dict,
-                action_noise_dict=action_noise_dict,
-                env_id=env_id,
-            )
+            # Check if environment supports joint_positions_dict parameter
+            if "joint_positions_dict" in inspect.signature(env.target_eef_pose_to_action).parameters:
+                play_action = env.target_eef_pose_to_action(
+                    target_eef_pose_dict=target_eef_pose_dict,
+                    gripper_action_dict=gripper_action_dict,
+                    action_noise_dict=action_noise_dict,
+                    joint_positions_dict=joint_positions_dict if joint_positions_dict else None,
+                    env_id=env_id,
+                )
+            else:
+                # Fallback for environments without joint_positions_dict support
+                play_action = env.target_eef_pose_to_action(
+                    target_eef_pose_dict=target_eef_pose_dict,
+                    gripper_action_dict=gripper_action_dict,
+                    action_noise_dict=action_noise_dict,
+                    env_id=env_id,
+                )
         else:
             # calling user-defined env.target_eef_pose_to_action() with noise parameter is deprecated
             # (replaced by action_noise_dict)

@@ -472,12 +472,23 @@ class DataGenerator:
             selected_src_subtask_boundary[0] : selected_src_subtask_boundary[1]
         ]
 
+        print(f"[DEBUG generate_eef_subtask_trajectory] {eef_name} subtask {subtask_ind}:", flush=True)
+        print(f"  Source demo target poses shape: {src_subtask_target_poses.shape}", flush=True)
+        if len(src_subtask_target_poses) > 0:
+            print(f"  First target pos: {src_subtask_target_poses[0, :3, 3].cpu().numpy()}", flush=True)
+            print(f"  Last target pos: {src_subtask_target_poses[-1, :3, 3].cpu().numpy()}", flush=True)
+
         # Get reference object pose from source demo
         src_subtask_object_pose = (
             src_ep_datagen_info.object_poses[subtask_object_name][selected_src_subtask_boundary[0]]
             if (subtask_object_name is not None)
             else None
         )
+
+        if src_subtask_object_pose is not None:
+            print(f"  Source demo block pos: {src_subtask_object_pose[:3, 3].cpu().numpy()}", flush=True)
+        if subtask_object_name is not None:
+            print(f"  Current block pos: {subtask_object_pose[:3, 3].cpu().numpy()}", flush=True)
 
         if is_first_subtask or self.env_cfg.datagen_config.generation_transform_first_robot_pose:
             # Source segment consists of first robot eef pose and the target poses. This ensures that
@@ -525,6 +536,12 @@ class DataGenerator:
                     transformed_eef_poses = src_eef_poses
 
         # Construct trajectory for the transformed segment.
+        print(f"[DEBUG generate_eef_subtask_trajectory] After transformation:", flush=True)
+        print(f"  Transformed poses shape: {transformed_eef_poses.shape}", flush=True)
+        if len(transformed_eef_poses) > 0:
+            print(f"  First transformed pos: {transformed_eef_poses[0, :3, 3].cpu().numpy()}", flush=True)
+            print(f"  Last transformed pos: {transformed_eef_poses[-1, :3, 3].cpu().numpy()}", flush=True)
+
         transformed_seq = WaypointSequence.from_poses(
             poses=transformed_eef_poses,
             gripper_actions=src_subtask_gripper_actions,
@@ -736,6 +753,7 @@ class DataGenerator:
                                 if motion_planner:
                                     print(f"\n--- Environment {env_id}: Planning motion to target pose ---")
                                     print(f"Target pose: {target_eef_pose}")
+                                    print(f"Target position: {target_eef_pose[:3, 3].cpu().numpy()}")
                                     print(f"Expected attached object: {expected_attached_object}")
 
                                     # This call updates the planner's world model and computes the trajectory.
@@ -770,6 +788,7 @@ class DataGenerator:
                                             f"Generated {len(current_eef_subtask_trajectories[eef_name])} waypoints"
                                             " from motion plan"
                                         )
+                                        print(f"[DEBUG] Ready to execute waypoints for {eef_name}", flush=True)
 
                                     else:
                                         # If planning fails, abort the data generation trial.
@@ -866,12 +885,14 @@ class DataGenerator:
             multi_waypoint = MultiWaypoint(eef_waypoint_dict)
 
             # Execute the next waypoints for all eefs
+            print(f"[DEBUG] About to execute waypoint, eef_waypoint_dict keys: {list(eef_waypoint_dict.keys())}", flush=True)
             exec_results = await multi_waypoint.execute(
                 env=self.env,
                 success_term=success_term,
                 env_id=env_id,
                 env_action_queue=env_action_queue,
             )
+            print(f"[DEBUG] Waypoint executed, states: {len(exec_results.get('states', []))}", flush=True)
 
             # Update execution state buffers
             if len(exec_results["states"]) > 0:
@@ -971,8 +992,28 @@ class DataGenerator:
         waypoints = []
         planned_poses = motion_planner.get_planned_poses()
 
-        for planned_pose in planned_poses:
-            waypoint = Waypoint(pose=planned_pose, gripper_action=gripper_action, noise=motion_noise_scale)
+        # Try to get joint positions directly from the planner (more efficient than IK)
+        planned_joint_positions = []
+        if hasattr(motion_planner, 'get_planned_joint_positions'):
+            planned_joint_positions = motion_planner.get_planned_joint_positions()
+            print(f"[DEBUG _convert_planned_trajectory_to_waypoints] Got {len(planned_joint_positions)} joint positions from planner", flush=True)
+
+        print(f"[DEBUG _convert_planned_trajectory_to_waypoints] Number of planned poses: {len(planned_poses)}", flush=True)
+        if len(planned_poses) > 0:
+            first_pose = planned_poses[0]
+            last_pose = planned_poses[-1]
+            print(f"[DEBUG] First planned pose position: {first_pose[:3, 3].cpu().numpy()}", flush=True)
+            print(f"[DEBUG] Last planned pose position: {last_pose[:3, 3].cpu().numpy()}", flush=True)
+
+        for i, planned_pose in enumerate(planned_poses):
+            # Include joint positions if available (avoids IK solve)
+            joint_pos = planned_joint_positions[i] if i < len(planned_joint_positions) else None
+            waypoint = Waypoint(
+                pose=planned_pose,
+                gripper_action=gripper_action,
+                noise=motion_noise_scale,
+                joint_positions=joint_pos
+            )
             waypoints.append(waypoint)
 
         return waypoints
