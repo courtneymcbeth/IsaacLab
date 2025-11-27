@@ -750,20 +750,56 @@ class DataGenerator:
                                     )
 
                                 # Plan motion using motion planner with comprehensive world update and attachment handling
+                                # For bimanual tasks, motion_planner is a dict with keys like "left_arm", "right_arm"
+                                # For single-arm tasks, motion_planner is a single planner object
+                                current_planner = None
                                 if motion_planner:
+                                    if isinstance(motion_planner, dict):
+                                        # Bimanual setup: select planner for specific arm
+                                        current_planner = motion_planner.get(eef_name)
+                                        if current_planner is None:
+                                            print(f"[WARNING] No motion planner found for arm: {eef_name}", flush=True)
+                                    else:
+                                        # Single-arm setup: use the planner directly
+                                        current_planner = motion_planner
+
+                                if current_planner:
                                     print(f"\n--- Environment {env_id}: Planning motion to target pose ---")
-                                    print(f"Target pose: {target_eef_pose}")
-                                    print(f"Target position: {target_eef_pose[:3, 3].cpu().numpy()}")
+                                    print(f"Target pose (world frame): {target_eef_pose}")
+                                    print(f"Target position (world frame): {target_eef_pose[:3, 3].cpu().numpy()}")
                                     print(f"Expected attached object: {expected_attached_object}")
 
+                                    # IMPORTANT: CuRobo expects poses in ROBOT BASE frame, not world frame!
+                                    # The target_eef_pose from SkillGen is in world frame, so we must transform it.
+                                    # For bimanual setups with differently oriented bases, this is critical.
+                                    target_pose_for_curobo = target_eef_pose
+                                    if hasattr(self.env, 'convert_world_pose_to_robot_frame'):
+                                        # Get the arm name for this planner
+                                        arm_name = None
+                                        if hasattr(current_planner, 'robot'):
+                                            for potential_arm_name in self.env_cfg.subtask_configs.keys():
+                                                if self.env.scene[potential_arm_name] is current_planner.robot:
+                                                    arm_name = potential_arm_name
+                                                    break
+
+                                        if arm_name:
+                                            target_pose_for_curobo = self.env.convert_world_pose_to_robot_frame(
+                                                target_eef_pose,
+                                                arm_name
+                                            )
+                                            print(f"[DEBUG] Converted target pose from world to {arm_name} robot frame", flush=True)
+                                            print(f"Target position (robot frame): {target_pose_for_curobo[:3, 3].cpu().numpy()}", flush=True)
+                                        else:
+                                            print(f"[DEBUG] Could not determine arm name, using world frame pose directly", flush=True)
+
                                     # This call updates the planner's world model and computes the trajectory.
-                                    planning_success = motion_planner.update_world_and_plan_motion(
-                                        target_pose=target_eef_pose,
+                                    planning_success = current_planner.update_world_and_plan_motion(
+                                        target_pose=target_pose_for_curobo,
                                         expected_attached_object=expected_attached_object,
                                         env_id=env_id,
-                                        step_size=getattr(motion_planner, "step_size", None),
-                                        enable_retiming=hasattr(motion_planner, "step_size")
-                                        and motion_planner.step_size is not None,
+                                        step_size=getattr(current_planner, "step_size", None),
+                                        enable_retiming=hasattr(current_planner, "step_size")
+                                        and current_planner.step_size is not None,
                                     )
 
                                     # If planning succeeds, execute the planner's trajectory first.
@@ -780,7 +816,7 @@ class DataGenerator:
                                         # Convert the planner's output into a sequence of waypoints to be executed.
                                         current_eef_subtask_trajectories[eef_name] = (
                                             self._convert_planned_trajectory_to_waypoints(
-                                                motion_planner, target_gripper_action
+                                                current_planner, target_gripper_action
                                             )
                                         )
                                         current_eef_subtask_step_indices[eef_name] = 0
@@ -877,9 +913,18 @@ class DataGenerator:
                 waypoint = current_eef_subtask_trajectories[eef_name][step_ind]
 
                 # Update visualization if motion planner is available
-                if motion_planner and motion_planner.visualize_spheres:
-                    current_joints = self.env.scene["robot"].data.joint_pos[env_id]
-                    motion_planner._update_visualization_at_joint_positions(current_joints)
+                if motion_planner:
+                    # For bimanual: motion_planner is a dict, get planner for current arm
+                    # For single-arm: motion_planner is the planner directly
+                    vis_planner = None
+                    if isinstance(motion_planner, dict):
+                        vis_planner = motion_planner.get(eef_name)
+                    else:
+                        vis_planner = motion_planner
+
+                    if vis_planner and hasattr(vis_planner, 'visualize_spheres') and vis_planner.visualize_spheres:
+                        current_joints = self.env.scene["robot"].data.joint_pos[env_id]
+                        vis_planner._update_visualization_at_joint_positions(current_joints)
 
                 eef_waypoint_dict[eef_name] = waypoint
             multi_waypoint = MultiWaypoint(eef_waypoint_dict)
@@ -992,6 +1037,25 @@ class DataGenerator:
         waypoints = []
         planned_poses = motion_planner.get_planned_poses()
 
+        # IMPORTANT: CuRobo outputs poses in robot base frame, but waypoints need world frame poses!
+        # For bimanual setups with differently oriented bases, we must transform to world frame.
+        if hasattr(self.env, 'convert_robot_poses_to_world_frame') and hasattr(motion_planner, 'robot'):
+            # Get the arm name from the planner's robot
+            arm_name = None
+            for eef_name in self.env_cfg.subtask_configs.keys():
+                if self.env.scene[eef_name] is motion_planner.robot:
+                    arm_name = eef_name
+                    break
+
+            if arm_name:
+                print(f"[DEBUG] Converting {len(planned_poses)} poses from {arm_name} base frame to world frame", flush=True)
+                planned_poses = self.env.convert_robot_poses_to_world_frame(
+                    torch.stack(planned_poses),
+                    arm_name
+                )
+                # Unstack back to list
+                planned_poses = [planned_poses[i] for i in range(len(planned_poses))]
+
         # Try to get joint positions directly from the planner (more efficient than IK)
         planned_joint_positions = []
         if hasattr(motion_planner, 'get_planned_joint_positions'):
@@ -1002,8 +1066,8 @@ class DataGenerator:
         if len(planned_poses) > 0:
             first_pose = planned_poses[0]
             last_pose = planned_poses[-1]
-            print(f"[DEBUG] First planned pose position: {first_pose[:3, 3].cpu().numpy()}", flush=True)
-            print(f"[DEBUG] Last planned pose position: {last_pose[:3, 3].cpu().numpy()}", flush=True)
+            print(f"[DEBUG] First planned pose position (world frame): {first_pose[:3, 3].cpu().numpy()}", flush=True)
+            print(f"[DEBUG] Last planned pose position (world frame): {last_pose[:3, 3].cpu().numpy()}", flush=True)
 
         for i, planned_pose in enumerate(planned_poses):
             # Include joint positions if available (avoids IK solve)

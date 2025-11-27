@@ -383,8 +383,10 @@ class MultiWaypoint:
         Returns:
             A dictionary containing the state, observation, action, and success of the multi-waypoint actions.
         """
+        print(f"[DEBUG MultiWaypoint.execute] Called for env_id={env_id}, arms={list(self.waypoints.keys())}", flush=True)
         # current state
         state = env.scene.get_state(is_relative=True)
+        print(f"[DEBUG MultiWaypoint.execute] Got scene state", flush=True)
 
         # construct action from target poses and gripper actions
         target_eef_pose_dict = {eef_name: waypoint.pose for eef_name, waypoint in self.waypoints.items()}
