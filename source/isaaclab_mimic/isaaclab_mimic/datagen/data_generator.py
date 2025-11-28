@@ -841,22 +841,36 @@ class DataGenerator:
                                 )
                                 current_eef_subtask_step_indices[eef_name] = 0
                         else:
-                            # Motion-planned trajectory has been executed, so we are ready to move to execute the next subtask
-                            print("Finished executing motion-planned trajectory")
-                            # It is important to pass the prev_executed_traj to merge_eef_subtask_trajectory
-                            # so that it can correctly interpolate from the last pose of the motion-planned trajectory
-                            prev_executed_traj = current_eef_subtask_trajectories[eef_name]
-                            current_eef_subtask_indices[eef_name] = next_eef_subtask_indices_after_motion[eef_name]
-                            current_eef_subtask_trajectories[eef_name] = self.merge_eef_subtask_trajectory(
-                                env_id,
-                                eef_name,
-                                current_eef_subtask_indices[eef_name],
-                                prev_executed_traj,
-                                next_eef_subtask_trajectories_after_motion[eef_name],
-                            )
-                            current_eef_subtask_step_indices[eef_name] = 0
-                            next_eef_subtask_trajectories_after_motion[eef_name] = None
-                            next_eef_subtask_indices_after_motion[eef_name] = None
+                            # Motion-planned trajectory has been executed
+                            subtask_config = self.env_cfg.subtask_configs[eef_name][next_eef_subtask_indices_after_motion[eef_name]]
+
+                            # For SkillGen: if num_fixed_steps=0 and num_interpolation_steps=0, skip demo trajectory
+                            # The motion-planned trajectory already reached the target, so we don't need demo waypoints
+                            if subtask_config.num_fixed_steps == 0 and subtask_config.num_interpolation_steps == 0:
+                                # Motion planning reached target, mark subtask as moving to next
+                                current_eef_subtask_indices[eef_name] = next_eef_subtask_indices_after_motion[eef_name]
+                                # Append last waypoint to keep arm stationary
+                                current_eef_subtask_trajectories[eef_name].append(
+                                    current_eef_subtask_trajectories[eef_name][-1]
+                                )
+                                # Reset step index to execute the stationary waypoint
+                                current_eef_subtask_step_indices[eef_name] = len(current_eef_subtask_trajectories[eef_name]) - 1
+                                next_eef_subtask_trajectories_after_motion[eef_name] = None
+                                next_eef_subtask_indices_after_motion[eef_name] = None
+                            else:
+                                # Standard behavior: merge and execute demo trajectory
+                                prev_executed_traj = current_eef_subtask_trajectories[eef_name]
+                                current_eef_subtask_indices[eef_name] = next_eef_subtask_indices_after_motion[eef_name]
+                                current_eef_subtask_trajectories[eef_name] = self.merge_eef_subtask_trajectory(
+                                    env_id,
+                                    eef_name,
+                                    current_eef_subtask_indices[eef_name],
+                                    prev_executed_traj,
+                                    next_eef_subtask_trajectories_after_motion[eef_name],
+                                )
+                                current_eef_subtask_step_indices[eef_name] = 0
+                                next_eef_subtask_trajectories_after_motion[eef_name] = None
+                                next_eef_subtask_indices_after_motion[eef_name] = None
 
             # Determine the next waypoint for each eef based on the current subtask constraints
             eef_waypoint_dict = {}
